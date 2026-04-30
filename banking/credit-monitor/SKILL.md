@@ -1,6 +1,6 @@
 ---
 name: tyc-credit-monitor
-description: 贷后存量借款客户的持续风险监控与变化预警
+description: 贷后管理中对存量借款客户的持续风险监控，关键风险信号变化即时预警
 category: banking
 version: 1.0
 ---
@@ -9,80 +9,120 @@ version: 1.0
 
 ## 触发条件
 
-用户需要对存量贷款客户进行定期风险监控、贷后管理检查时触发。
+贷后管理周期性体检（月度/季度）、存量客户预警监控、风险信号变化触发。
 
-关键词: 贷后管理、风险监控、信贷监控、风险预警、定期体检
+关键词：贷后监控、风险预警、存量客户、信号触发、定期体检
 
 ## 输入要求
 
-- **keyword** (必填): 企业名称、公司ID、注册号或统一社会信用代码
+用户输入的企业标识可能是以下三种形式之一，**Step 0 会按形式分流**，不要急着把用户原话当成 `searchKey` 喂给后续步骤：
+
+| 输入形式 | 示例 | 是否需要 L0 实体锚定 |
+|---|---|---|
+| **完整企业名**（含组织形式后缀：`有限公司` / `股份有限公司` / `集团` / `合伙企业` / `个体工商户` / `事务所` / `中心` 等） | `北京字节跳动科技有限公司` / `腾讯科技（深圳）有限公司` | ❌ 跳过 L0，直接当 `searchKey` |
+| **统一社会信用代码（USCC）** 18 位大写字母+数字 | `91110108551385082Q` | ❌ 跳过 L0，直接当 `searchKey` |
+| **企业简称 / 曾用名 / 品牌名 / 模糊指代** | `字节` / `抖音` / `今日头条` / `乐视` / `阿里` | ✅ **必须先走 L0**，由用户在候选中确认唯一企业，再拿 `creditCode` 作为 `searchKey` |
+
+> 经过 Step 0 锚定后，下文 Step 1+ 的 `searchKey` 都指**精确企业名或 USCC**，调用方式不变。
 
 ## 执行流程
 
-### Step 1: 综合风险快照
+### Step 0: 实体锚定（条件性 · L0 工具：`search_companies`）
 
-- 调用 `t1_risk_riskInfo` (参数: keyword) — 获取当前天眼风险综合评估
+**目的**：用户给的常常是简称、曾用名、模糊指代，下游所有步骤都依赖精确企业；先用 L0 把它消歧成唯一 `creditCode`，避免后续步骤在错主体上反复烧 token。
 
-### Step 2: 司法风险变化
+**判定与分流**：
 
-- 调用 `t1_jr_lawSuit` (参数: keyword, pageNum, pageSize) — 最新法律诉讼
-- 调用 `t1_jr_zhixinginfo` (参数: keyword, pageNum, pageSize) — 最新被执行人
-- 调用 `t1_jr_dishonest` (参数: keyword, pageNum, pageSize) — 最新失信信息
+1. **若 userInput 匹配 USCC 正则** `^[0-9A-Z]{18}$` → 跳过 L0，`searchKey = userInput`
+2. **若 userInput 含组织形式后缀**（`有限公司` / `股份` / `集团` / `合伙企业` / `事务所` / `个体工商户` / `分公司` 等）**且长度 ≥ 6** → 跳过 L0，`searchKey = userInput`
+3. **否则**（简称 / 曾用名 / 品牌名 / 任何看起来不完整的字符串）→ **必须走 L0**：
 
-### Step 3: 经营异常变化
+   - 调用 `search_companies` (`searchKey: userInput`)
+   - 在返回 `items[]` 中默认按 `regStatus ∈ {存续, 在业, 在营, 开业}` 过滤，按 `regCapital` 倒序取 Top 5 作为候选展示
+   - **候选 = 1** → 自动锚定，`searchKey = items[0].creditCode`
+   - **候选 ≥ 2** → **暂停执行**，向用户输出候选清单（`name` / `creditCode` / `regStatus` / `regLocation` / `legalPersonName`）请求确认，待回复后取选定企业的 `creditCode` 作为 `searchKey`
+   - **候选 = 0** → 终止流程，提示"未找到匹配企业，请提供更完整的名称或换关键词"
 
-- 调用 `t1_mr_abnormal` (参数: keyword, pageNum, pageSize) — 经营异常
-- 调用 `t1_mr_illegalinfo` (参数: keyword, pageNum, pageSize) — 严重违法
+**对用户的话术（候选 ≥ 2 时）**：
 
-### Step 4: 工商变更记录
+> 你说的「{userInput}」匹配到 N 家企业，请确认是哪一家：
+>
+> | # | 企业名称 | USCC | 状态 | 法定代表人 | 注册地 |
+> |---|---|---|---|---|---|
+> | 1 | … | … | 存续 | … | … |
+> | 2 | … | … | 存续 | … | … |
+>
+> 回复编号（1-N）以继续，或回复"都不是"重新输入。
 
-- 调用 `t1_ic_changeinfo` (参数: keyword, pageNum, pageSize) — 变更记录（法人变更、注册资本变更、股东变更等）
+### Step 1: 工商基本面变更
+- `get_company_registration_info` — 当前状态
+- `get_change_records` — 工商变更记录（关注法人/资本/地址变更）
 
-### Step 5: 历史股东变更
+### Step 2: 经营异常信号
+- `get_business_exception` — 经营异常名录
+- `get_serious_violation` — 严重违法
+- `get_administrative_penalty` — 行政处罚
 
-- 调用 `t1_hi_holder` (参数: keyword, pageNum, pageSize) — 历史股东变动
+### Step 3: 司法风险信号
+- `get_dishonest_info` — 失信
+- `get_judgment_debtor_info` — 被执行
+- `get_high_consumption_restriction` — 限高
+- `get_case_filing_info` — 立案信息（早期信号）
+
+### Step 4: 资产状态
+- `get_equity_freeze` — 股权冻结
+- `get_chattel_mortgage_info` — 动产抵押
+- `get_judicial_auction` — 司法拍卖
+
+### Step 5: 集中预警
+- `get_risk_overview` — 综合风险
 
 ## 输出格式
 
 ```markdown
-# 信贷风险监控报告 — {企业名称}
+# 贷后风险监控报告 — {name}
 
-> 监控时间: {当前时间}
+> 监控周期: {since} 至 {now}
 
-## 一、风险快照
-（天眼风险综合评估结果）
+## 关键风险信号变化
+- ⚠️ 法定代表人变更: 是/否
+- ⚠️ 注册资本异动: 是/否
+- 🚨 新增失信记录: {n} 条
+- 🚨 新增被执行: {n} 条
+- 🚨 股权被冻结: 是/否
+- 🚨 司法拍卖标的: 是/否
 
-## 二、司法风险动态
-| 类型 | 当前数量 | 最新变化 | 关注事项 |
-| 法律诉讼 | | 新增X起 | |
-| 被执行人 | | | |
-| 失信被执行 | | | |
+## 综合风险评级变化
+- 上期评级: A
+- 本期评级: B
+- 评级下调原因: ...
 
-## 三、经营状态动态
-| 类型 | 状态 | 变化情况 |
-| 经营异常 | | |
-| 严重违法 | | |
-
-## 四、工商变更预警
-| 变更事项 | 变更前 | 变更后 | 变更时间 |
-（重点关注: 法人变更、注册资本减少、股东退出）
-
-## 五、股东变动
-| 股东名 | 变动类型 | 时间 |
-
-## 六、监控结论
-- 风险变化趋势: 恶化/稳定/改善
-- 预警等级: 正常/关注/警告/危险
-- 建议措施: ...
+## 处置建议
+- 是否触发预警: 是/否
+- 建议措施: 提前结清 / 增加担保 / 强化监控 / 维持
 ```
 
 ## 错误处理
 
-- 各接口独立调用，单个接口失败不影响整体报告
-- 标注各维度数据的获取时间，方便与上期对比
+- 若 Step 0 候选 = 0 → 终止流程，提示"未找到匹配企业，请提供更完整的名称或 USCC"，不要带着错主体往下跑
+- 若 Step 0 候选 ≥ 2 而用户在合理时间内未回复 → 暂存上下文，**不要自行选择**第一条作为锚定（错锚定的代价远大于等待）
 
 ## 示例
 
-输入: `keyword = "某建设工程有限公司"`
+输入: `searchKey = "ABC 借款企业"`
 
-输出: 完整信贷风险监控报告。
+---
+
+**新输入形态参考**（Step 0 引入后的三种典型）：
+
+**例 1（USCC 直通，跳过 L0）**：
+
+输入: `userInput = "91110108551385082Q"` → Step 0 判定 USCC，`searchKey = userInput`，直接进 Step 1。
+
+**例 2（完整企业名直通，跳过 L0）**：
+
+输入: `userInput = "北京字节跳动科技有限公司"` → Step 0 判定含 `有限公司` 后缀且长度 ≥ 6，`searchKey = userInput`，直接进 Step 1。
+
+**例 3（简称，必走 L0）**：
+
+输入: `userInput = "字节"` → Step 0 调 `search_companies (searchKey: "字节")`，过滤存续后取 Top 5，向用户列出候选请求确认；用户回复"1"（北京字节跳动科技有限公司）→ `searchKey = items[0].creditCode`，再进 Step 1。

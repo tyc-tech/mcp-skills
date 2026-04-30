@@ -1,6 +1,6 @@
 ---
 name: tyc-trade-compliance
-description: 跨境贸易与国际结算场景下的进出口企业合规核查
+description: 跨境贸易与国际结算场景下的合规准入工具，整合海关信用、经营资质、进出口许可与制裁名单筛查
 category: banking
 version: 1.0
 ---
@@ -9,82 +9,102 @@ version: 1.0
 
 ## 触发条件
 
-用户需要对进出口企业进行贸易融资合规准入审查时触发。
+跨境贸易开证、外汇业务、信用证议付前的客户合规准入审核时触发。
 
-关键词: 贸易融资、进出口、合规核查、开证、议付
+关键词：贸易融资、跨境合规、进出口、海关、制裁、FATF
 
 ## 输入要求
 
-- **keyword** (必填): 企业名称、公司ID、注册号或统一社会信用代码
-- **code** (可选): 注册号/统一社会信用代码（用于三要素核验）
-- **name** (可选): 公司名称（用于三要素核验）
-- **legalPersonName** (可选): 法人姓名（用于三要素核验）
+用户输入的企业标识可能是以下三种形式之一，**Step 0 会按形式分流**，不要急着把用户原话当成 `searchKey` 喂给后续步骤：
+
+| 输入形式 | 示例 | 是否需要 L0 实体锚定 |
+|---|---|---|
+| **完整企业名**（含组织形式后缀：`有限公司` / `股份有限公司` / `集团` / `合伙企业` / `个体工商户` / `事务所` / `中心` 等） | `北京字节跳动科技有限公司` / `腾讯科技（深圳）有限公司` | ❌ 跳过 L0，直接当 `searchKey` |
+| **统一社会信用代码（USCC）** 18 位大写字母+数字 | `91110108551385082Q` | ❌ 跳过 L0，直接当 `searchKey` |
+| **企业简称 / 曾用名 / 品牌名 / 模糊指代** | `字节` / `抖音` / `今日头条` / `乐视` / `阿里` | ✅ **必须先走 L0**，由用户在候选中确认唯一企业，再拿 `creditCode` 作为 `searchKey` |
+
+> 经过 Step 0 锚定后，下文 Step 1+ 的 `searchKey` 都指**精确企业名或 USCC**，调用方式不变。
 
 ## 执行流程
 
-### Step 1: 主体核验
+### Step 0: 实体锚定（条件性 · L0 工具：`search_companies`）
 
-- 调用 `t1_ic_baseinfoV3` (参数: keyword) — 获取企业基本信息
-- 调用 `t1_ic_verify` (参数: code, name, legalPersonName) — 三要素一致性验证（如提供了三要素参数）
+**目的**：用户给的常常是简称、曾用名、模糊指代，下游所有步骤都依赖精确企业；先用 L0 把它消歧成唯一 `creditCode`，避免后续步骤在错主体上反复烧 token。
 
-### Step 2: 进出口信用
+**判定与分流**：
 
-- 调用 `t1_m_importAndExport` (参数: keyword) — 获取海关注册编码、注册海关、经营类别等进出口信用信息
+1. **若 userInput 匹配 USCC 正则** `^[0-9A-Z]{18}$` → 跳过 L0，`searchKey = userInput`
+2. **若 userInput 含组织形式后缀**（`有限公司` / `股份` / `集团` / `合伙企业` / `事务所` / `个体工商户` / `分公司` 等）**且长度 ≥ 6** → 跳过 L0，`searchKey = userInput`
+3. **否则**（简称 / 曾用名 / 品牌名 / 任何看起来不完整的字符串）→ **必须走 L0**：
 
-### Step 3: 经营资质许可
+   - 调用 `search_companies` (`searchKey: userInput`)
+   - 在返回 `items[]` 中默认按 `regStatus ∈ {存续, 在业, 在营, 开业}` 过滤，按 `regCapital` 倒序取 Top 5 作为候选展示
+   - **候选 = 1** → 自动锚定，`searchKey = items[0].creditCode`
+   - **候选 ≥ 2** → **暂停执行**，向用户输出候选清单（`name` / `creditCode` / `regStatus` / `regLocation` / `legalPersonName`）请求确认，待回复后取选定企业的 `creditCode` 作为 `searchKey`
+   - **候选 = 0** → 终止流程，提示"未找到匹配企业，请提供更完整的名称或换关键词"
 
-- 调用 `t1_m_getLicense` (参数: keyword, pageNum, pageSize) — 行政许可(工商)
-- 调用 `t1_m_getAdministrativeLicense` (参数: keyword, pageNum, pageSize) — 行政许可(含有效期)
+**对用户的话术（候选 ≥ 2 时）**：
 
-### Step 4: 处罚与异常
+> 你说的「{userInput}」匹配到 N 家企业，请确认是哪一家：
+>
+> | # | 企业名称 | USCC | 状态 | 法定代表人 | 注册地 |
+> |---|---|---|---|---|---|
+> | 1 | … | … | 存续 | … | … |
+> | 2 | … | … | 存续 | … | … |
+>
+> 回复编号（1-N）以继续，或回复"都不是"重新输入。
 
-- 调用 `t1_mr_punishmentInfo` (参数: keyword, pageNum, pageSize) — 行政处罚
-- 调用 `t1_mr_abnormal` (参数: keyword, pageNum, pageSize) — 经营异常
+### Step 1: 主体合规
+- `get_company_registration_info`
+- `verify_company_accuracy`
 
-### Step 5: 失信与被执行
+### Step 2: 海关与进出口
+- `get_import_export_credit` — 海关注册编码、信用等级
+- `get_administrative_license` — 进出口相关许可与有效期
+- `get_telecom_license` — 跨境数据/通信类许可（如适用）
 
-- 调用 `t1_jr_dishonest` (参数: keyword, pageNum, pageSize) — 失信被执行人
-- 调用 `t1_jr_zhixinginfo` (参数: keyword, pageNum, pageSize) — 被执行人
+### Step 3: 制裁与失信
+- `get_dishonest_info` — 失信
+- `get_administrative_penalty` — 海关/外汇类处罚
 
-### Step 6: 综合风险
-
-- 调用 `t1_risk_riskInfo` (参数: keyword) — 天眼风险综合评估
+### Step 4: 风险综合
+- `get_risk_overview`
+- `get_news_sentiment` — 制裁/媒体负面舆情筛查
 
 ## 输出格式
 
 ```markdown
-# 贸易融资合规核查报告 — {企业名称}
+# 贸易融资合规报告 — {name}
 
-## 一、主体核验
-| 字段 | 值 |
-（三要素验证结果）
-
-## 二、进出口信用
-| 海关注册编码 | 注册海关 | 经营类别 | 信用等级 |
-
-## 三、经营资质
-| 许可名称 | 许可机关 | 有效期 | 状态 |
-
-## 四、风险扫描
-| 风险类型 | 数量 |
-| 行政处罚 | |
-| 经营异常 | |
-| 失信被执行 | |
-| 被执行人 | |
-
-## 五、综合评估
-- 合规准入结论: 通过/不通过/需补充审查
-- 风险等级: ...
-- 建议: ...
+## 一、主体合规
+## 二、海关信用与进出口资质
+## 三、制裁与失信筛查
+## 四、综合合规评级
+- 准入决定: 通过 / 增强审核 / 拒绝
+- 跨境业务限额建议: ...
 ```
 
 ## 错误处理
 
-- 三要素核验接口仅在用户提供完整三要素参数时调用，否则跳过
-- 进出口信用接口返回空时标注"未查询到进出口登记信息"
+- 若 Step 0 候选 = 0 → 终止流程，提示"未找到匹配企业，请提供更完整的名称或 USCC"，不要带着错主体往下跑
+- 若 Step 0 候选 ≥ 2 而用户在合理时间内未回复 → 暂存上下文，**不要自行选择**第一条作为锚定（错锚定的代价远大于等待）
 
 ## 示例
 
-输入: `keyword = "某进出口贸易有限公司"`
+输入: `searchKey = "中国五矿集团有限公司"`
 
-输出: 完整贸易融资合规核查报告。
+---
+
+**新输入形态参考**（Step 0 引入后的三种典型）：
+
+**例 1（USCC 直通，跳过 L0）**：
+
+输入: `userInput = "91110108551385082Q"` → Step 0 判定 USCC，`searchKey = userInput`，直接进 Step 1。
+
+**例 2（完整企业名直通，跳过 L0）**：
+
+输入: `userInput = "北京字节跳动科技有限公司"` → Step 0 判定含 `有限公司` 后缀且长度 ≥ 6，`searchKey = userInput`，直接进 Step 1。
+
+**例 3（简称，必走 L0）**：
+
+输入: `userInput = "字节"` → Step 0 调 `search_companies (searchKey: "字节")`，过滤存续后取 Top 5，向用户列出候选请求确认；用户回复"1"（北京字节跳动科技有限公司）→ `searchKey = items[0].creditCode`，再进 Step 1。
