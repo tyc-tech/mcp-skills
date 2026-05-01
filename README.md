@@ -4,26 +4,27 @@
 >
 > 底层工具：[`conf/api-registry.yaml`](../../conf/api-registry.yaml)  ·  分层总表：[`docs/t1_1/tool-layers.md`](../../docs/t1_1/tool-layers.md)
 
-## 工具分层（L0 / L1 / L2 / L3）
+## 工具分层（L0 / L1 / L2 / L3 + L2 优先 ★）
 
-每个 Skill 内部工具引用都带 `[LX]` 徽章，表明其在 tyc-cli 4 层架构中的位置：
+每个 Skill 内部工具引用都带 `[LX]` 徽章（含 `[L2★]`），表明其在 tyc-cli 4 层架构中的位置：
 
 - **[L0] Resolve · 1**：实体锚定 — 把用户输入(简称 / 曾用名 / 模糊名)解析为精确企业（USCC + 全名）。Agent 第 0 跳，下游全靠它锚定主体
 - **[L1] Overview · 6**：**6 facet × 1 队长** — company-base（`get_company_registration_info`）/ 风险 / 知产 / 经营信用 / 历史 / 董监高 各 1 个总览队长，拿到 USCC 后按 facet 选对应队长
-- **[L2] Drill-down · 58**：一级数据维度展开（股权 / 诉讼 / 招投标 / 年报 …）
-- **[L3] Specialized · 100**：ID 详情 / `search_*` / 上市专项 / 私募 / 建筑 / 人员微查询
+- **[L2] Drill-down · 57**：一级数据维度展开（股权 / 诉讼 / 招投标 / 年报 …）；其中 **6 个为 ★ L2 优先（"L2★ 队副"，每 facet 1 个）**：company→`get_shareholder_info` / risk→`get_judicial_case` / ip→`get_trademark_info` / operation→`get_bidding_info` / history→`get_historical_registration` / executive→`get_person_risk_overview`，Agent 拿到 L1 `_summary` 不确定走哪个 L2 时默认推这 6 个之一
+- **[L3] Specialized · 98**：ID 详情 / `search_*` / 上市专项 / 私募 / 建筑 / 人员微查询
 
-Skill 执行流程内部的 Step 顺序一般遵循 L0 → L1 → L2 → L3 的下钻梯度。AI Agent 读 SKILL.md 时可以直接按徽章判断工具的信息密度与调用代价。
+Skill 执行流程内部的 Step 顺序一般遵循 L0 → L1 → L2 → L3 的下钻梯度。AI Agent 读 SKILL.md 时可以直接按徽章判断工具的信息密度与调用代价；Step 写"L1 之后该走哪个 L2"时，缺省可用对应 facet 的 ★ L2 优先作为安全默认。
 
-CLI 侧工具发现入口：`tyc layers` / `tyc L0 list` / `tyc L1 list` / `tyc L2 list` / `tyc L3 list`。
+CLI 侧工具发现入口：`tyc layers`（含 L2 优先 ★ 映射）/ `tyc L0 list` / `tyc L1 list` / `tyc L2 list`（★ 置顶）/ `tyc L3 list`。
 
 ### 分层设计亮点
 
 - **LLM 选择率抗塌方**：LLM 工具选择准确率 >95%（≤10 工具）→ ~70%（30）→ <50%（100+）；本项目默认给 LLM 暴露 = L0 + L1 = 7 个，远低于"≤ 15"的工具暴露阈值
 - **L0 只做实体锚定**：用户输入的常是简称/曾用名/模糊指代，把消歧从概览里剥离，Skill 第一步统一走 search_companies 拿到 USCC，避免下游在错主体上重复烧 token
+- **L2 优先（★）= 6 facet × 1 队副**：57 个 L2 里挑 6 个高优先工具与 L1 facet 一一对齐，Skill 在"L1 → L2"那一跳缺省可推 ★；它**不进默认 LLM 暴露面**，只在渐进披露的下一跳显式标注
 - **渐进披露 vs 扁平暴露**：竞品 QA 把 146 工具一次推给 LLM（其中 38 对相似度 > 0.8），本项目按 `_summary + drill_down` 按需加载，相同任务 token ≤ QA × 0.8
-- **信息密度递减**：层号越小，单位 token 信息密度越高；Skill 写 Step 0 用 L0、Step 1 用 L1、Step 2-3 用 L2、Step 4+ 用 L3 是默认模板
-- **徽章即契约**：徽章同时出现在 Skill 文档、apis md、CLI help、catalog.json 四处，事前透明；v0.4 改版期间 SSOT 暂以 `cli/t1_1/src/catalog.json` 为准（详见项目根 CLAUDE.md "SSOT 漂移"小节）
+- **信息密度递减**：层号越小，单位 token 信息密度越高；Skill 写 Step 0 用 L0、Step 1 用 L1、Step 2-3 用 L2（不确定→★）、Step 4+ 用 L3 是默认模板
+- **徽章即契约**：徽章同时出现在 Skill 文档、apis md（含 `[L2★]`）、CLI help、catalog.json 四处，事前透明；v0.4 改版期间 SSOT 暂以 `cli/t1_1/src/catalog.json` 为准（含 6 个 L2 工具的 `priority: true` 字段；详见项目根 CLAUDE.md "SSOT 漂移"小节）
 
 ## 核心特点
 
