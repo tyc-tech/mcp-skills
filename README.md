@@ -115,15 +115,29 @@ version: 1.0
 
 ## 输出格式说明（CLI 端）
 
-Skill 编排既可以通过 AI Agent 直接调 MCP Server `tools/call`，也可以通过 `tyc-cli` 在命令行调用（CLI 同样走 MCP 协议）。CLI 提供 3 种输出模式（互斥优先级：`--md` > `--pretty` > 默认）：
+Skill 编排既可以通过 AI Agent 直接调 MCP Server `tools/call`，也可以通过 `tyc-cli` 在命令行调用（CLI 同样走 MCP 协议）。CLI 提供 3 种输出模式（互斥优先级：`--md` > `--compact` > `--pretty` / 默认）：
 
 | 模式 | 适合场景 |
 |------|---------|
-| 默认（紧凑 JSON 单行） | 脚本管道、`jq` 解析、批处理 |
-| `--pretty`（缩进 JSON） | 调试、日志归档 |
+| 默认（缩进 JSON / pretty） | 人/Agent 通用；调试、日志归档 |
+| `--pretty`（缩进 JSON） | 同默认；保留 flag 以保持向后兼容 / 显式声明意图 |
+| `--compact`（紧凑单行 JSON） | 脚本管道、`jq` 解析、批处理（旧默认行为） |
 | `--md`（Markdown 表格） | 人类阅读、AI Agent 直接上屏（自动渲染 `_summary` / 元数据 / `items` 表格） |
 
-> **AI Agent 编排建议**：当 Skill 输出最终面向用户展示时，建议在 CLI 调用层加 `--md`，让 Agent 直接获得格式化好的 Markdown 报告，省去再做模板套壳的成本。
+CLI 还提供 5 个**截断与落盘**全局选项（与上述输出格式正交，可叠加任意命令）：
+
+| 选项 | 默认值 | 说明 |
+|------|-------:|------|
+| `--head [N]` | 50 | 仅打印前 N 行；与 `--tail` 同时给则同时输出两端 |
+| `--tail [M]` | 20 | 仅打印后 M 行 |
+| `--full` | false | 强制完整（最高优先级，覆盖 `--head/--tail/--threshold`） |
+| `--threshold <BYTES>` | 5000 | **字节截断主开关**：超过该字节数从头按字节截；**不传永不截断**；与 `--head/--tail` 同时给则按字节截，行参数被忽略 |
+| `--output-file <PATH>` | — | 把完整结果写入指定路径；**不传永不落盘** |
+
+> **AI Agent 编排建议**：
+> - 输出最终面向用户展示时，加 `--md` 直接获得格式化 Markdown 报告，省去模板套壳；
+> - 在 LLM context 受限时，用 `--threshold 4000`（或 `--head/--tail` 组合）控制 stdout 长度，配合 `--output-file` 把完整结果落到磁盘供后续 step 读取；
+> - 截断/落盘提示打到 stderr，stdout 始终是可程序化解析的纯净数据流。
 
 ## Skill 与底层工具
 
